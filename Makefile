@@ -30,7 +30,7 @@ DMOD_CSOURCES=src/dmmp3.c
 DMOD_CXXSOURCES=
 
 # The list of include directories
-DMOD_INC_DIRS=include
+DMOD_INC_DIRS=include src
 
 # The list of libraries to link
 DMOD_LIBS=

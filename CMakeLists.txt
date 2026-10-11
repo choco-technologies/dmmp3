@@ -27,7 +27,7 @@ set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
 FetchContent_MakeAvailable(dmod)
 
 project(dmmp3 VERSION ${DMOD_MODULE_VERSION}
-    DESCRIPTION "dmmp3 DMOD library module"
+    DESCRIPTION "dmmp3 - MP3 files: their tags and samples (minimp3)"
     LANGUAGES C CXX)
 
 set(DMOD_DIR ${dmod_SOURCE_DIR} CACHE PATH "DMOD source directory")

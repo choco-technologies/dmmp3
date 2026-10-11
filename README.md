@@ -3,102 +3,61 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/choco-technologies/dmmp3/actions/workflows/ci.yml/badge.svg)](https://github.com/choco-technologies/dmmp3/actions/workflows/ci.yml)
 
-dmmp3 DMOD library module.
+MP3 files for dmod: their tags and their samples.
 
-## Description
+```c
+#include "dmmp3.h"
 
-TODO: describe what this module does.
+dmmp3_info_t info;
+dmmp3_read_info("/mnt/sd/music/song.mp3", &info);       /* tags, rate, channels, length - no decoder */
+
+int status;
+dmmp3_t mp3 = dmmp3_open("/mnt/sd/music/song.mp3", &status);
+static int16_t pcm[1152 * 2];
+int32_t frames;
+while ((frames = dmmp3_read(mp3, pcm, 1152)) > 0)
+    /* interleaved signed 16-bit, info.channels per frame, at info.sample_rate_hz */;
+dmmp3_seek(mp3, 60000);                                   /* a minute in */
+dmmp3_close(mp3);
+```
+
+- **Decoding**: [minimp3](https://github.com/lieff/minimp3) (CC0), MPEG-1,
+  -2 and -2.5 layer III, constant and variable bit rates, into signed 16-bit
+  samples. Its 16 kB scratch is the decoder's, not the stack's (one change of
+  `src/minimp3/minimp3.h`, marked at its top), so a thread with a small stack
+  decodes. A decoder takes about 44 kB of the heap: minimp3's state and
+  scratch, 16 kB of the file, a frame of samples.
+- **Tags**: ID3v2.2, .3 and .4 - title, artist, album, in ISO-8859-1, UTF-16
+  or UTF-8, given as UTF-8 of up to 63 bytes - and ID3v1 for what ID3v2 does
+  not have. Pictures and everything else are skipped, never read.
+- **Length**: from the Xing / Info header's frame count (VBR files made by
+  LAME, ffmpeg), else from the first frame's bit rate.
+- **Seeking**: by the Xing table of contents (as close as it tells), else by
+  the bit rate (exact for a constant one); `dmmp3_tell()` counts the frames a
+  seek leaves out until the bit reservoir is full again.
+
+See [docs/api-reference.md](docs/api-reference.md).
 
 ## Building
 
-### Using CMake
-
 ```bash
-mkdir -p build
-cd build
-cmake ..
-cmake --build .
-```
-
-Pass `-DDMOD_DIR=/path/to/local/dmod` to build against a local dmod checkout
-instead of fetching `develop` from GitHub.
-
-### Using Make
-
-```bash
-make DMOD_MODE=DMOD_MODULE DMOD_DIR=/path/to/dmod
+cmake -S . -B build -DDMOD_TOOLS_NAME=arch/armv7/cortex-m7
+cmake --build build
 ```
 
 ## Testing
 
-Tests are built automatically alongside the module (see `tests/`). Once built,
-run them with `ctest`:
-
 ```bash
-cd build
-ctest --output-on-failure
+cmake -S . -B build && cmake --build build
+cd build && ctest --output-on-failure
 ```
 
-`ctest` installs the test module's dependencies with `dmf-get` and then runs
-it through `dmod_loader`. To run it manually instead:
-
-```bash
-export DMOD_DMF_DIR=$(pwd)/build/dmf
-dmf-get install -d ${DMOD_DMF_DIR}/test_dmmp3-local.dmd -y
-dmod_loader build/dmf/test_dmmp3.dmf
-```
-
-## Usage
-
-<TBD>
-
-This library module provides functions that can be used by other modules:
-
-```c
-#include "dmmp3.h"
-```
-
-## API
-
-| Function | Description |
-|----------|-------------|
-| `dmmp3_create()` | Create a new `dmmp3_t` instance. |
-| `dmmp3_destroy()` | Destroy an instance created by `_create()`. |
-| `dmmp3_is_valid()` | Check whether a handle is a valid instance. |
-
-See [include/dmmp3.h](include/dmmp3.h) for the full
-declarations and [docs/api-reference.md](docs/api-reference.md) for the
-complete reference.
-
-## Documentation
-
-See the `docs/` directory:
-
-- **[api-reference.md](docs/api-reference.md)** - Complete API documentation
-
-View documentation using `dmf-man dmmp3`.
-## Project Structure
-
-```
-dmmp3/
-├── docs/              # Documentation (markdown format)
-├── include/           # Public headers
-│   └── dmmp3.h
-├── src/
-│   └── dmmp3.c
-├── tests/
-│   ├── CMakeLists.txt
-│   └── dmmp3_test.c
-├── CMakeLists.txt
-├── Makefile
-├── dmmp3.dmr
-└── manifest.dmm
-```
-
-## Author
-
-Patryk Kubiak
+`tests/fixtures` holds three small files made with ffmpeg (libmp3lame): a
+constant bit rate mono file without tags, a VBR stereo file with a Xing
+header and ID3v2.3 tags in UTF-16, a file with an ID3v1 tag only. The test
+reads their tags and lengths, decodes them (the tones are checked by their
+zero crossings) and seeks in them.
 
 ## License
 
-MIT
+MIT - see [LICENSE](LICENSE). minimp3: CC0 ([src/minimp3/LICENSE](src/minimp3/LICENSE)).
