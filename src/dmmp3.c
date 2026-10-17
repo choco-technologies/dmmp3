@@ -10,7 +10,10 @@
  * a thread with a small stack can decode. minimp3's state and the scratch
  * are worked on all the time: they are a block of their own (state_t), of
  * "fast" memory when the system has it (Dmod_MallocTagged) - internal RAM,
- * where the default memory is external behind a small cache.
+ * where the default memory is external behind a small cache. A closed
+ * decoder's block is kept for the next one (g_spare): a player going from
+ * file to file keeps its fast memory - freed and allocated again, the place
+ * could be taken by something small meanwhile, and the next one not fit.
  */
 
 static void* scratch_of(void* dec);
@@ -517,6 +520,28 @@ dmod_dmmp3_api_declaration(1.0, int, _find_picture, ( const char* path, dmmp3_pi
 
 /* ---- Decoding ---- */
 
+static state_t* g_spare;                /* A closed decoder's state, for the next one */
+
+static state_t* state_new(void)
+{
+    Dmod_EnterCritical();
+    state_t* s = g_spare;
+    g_spare = NULL;
+    Dmod_ExitCritical();
+    return (s != NULL) ? s : Dmod_MallocTagged("fast", sizeof(state_t));
+}
+
+static void state_free(state_t* s)
+{
+    Dmod_EnterCritical();
+    bool kept = g_spare == NULL;
+    if (kept)
+        g_spare = s;
+    Dmod_ExitCritical();
+    if (!kept)
+        Dmod_Free(s);
+}
+
 static bool is_mp3(dmmp3_t m)
 {
     return m != NULL && m->magic == MP3_MAGIC;
@@ -556,7 +581,7 @@ dmod_dmmp3_api_declaration(1.0, dmmp3_t, _open, ( const char* path, int* status 
         *status = ret;
         return NULL;
     }
-    if ((m->state = Dmod_MallocTagged("fast", sizeof(state_t))) == NULL)
+    if ((m->state = state_new()) == NULL)
     {
         Dmod_FileClose(f);
         Dmod_Free(m);
@@ -584,7 +609,7 @@ dmod_dmmp3_api_declaration(1.0, void, _close, ( dmmp3_t mp3 ))
         return;
     Dmod_FileClose(mp3->file);
     mp3->magic = 0;
-    Dmod_Free(mp3->state);
+    state_free(mp3->state);
     Dmod_Free(mp3);
 }
 
@@ -769,5 +794,8 @@ int dmod_init(const Dmod_Config_t* Config)
 
 int dmod_deinit(void)
 {
+    if (g_spare != NULL)
+        Dmod_Free(g_spare);
+    g_spare = NULL;
     return 0;
 }
