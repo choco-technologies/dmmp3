@@ -7,7 +7,10 @@
 /*
  * The decoder: minimp3 fed from a buffer of the file. Its scratch - 16 kB
  * that minimp3 keeps on the stack - is the decoder's (MINIMP3_SCRATCH), so
- * a thread with a small stack can decode.
+ * a thread with a small stack can decode. minimp3's state and the scratch
+ * are worked on all the time: they are a block of their own (state_t), of
+ * "fast" memory when the system has it (Dmod_MallocTagged) - internal RAM,
+ * where the default memory is external behind a small cache.
  */
 
 static void* scratch_of(void* dec);
@@ -33,11 +36,17 @@ static void* scratch_of(void* dec)
     return ((decoder_t*)dec)->scratch;
 }
 
+/* What decoding works on all the time */
+typedef struct
+{
+    decoder_t           d;
+    mp3dec_scratch_t    scratch;
+} state_t;
+
 struct dmmp3
 {
     uint32_t            magic;
-    decoder_t           d;
-    mp3dec_scratch_t    scratch;
+    state_t*            state;          /* "fast" memory, when there is (Dmod_MallocTagged) */
     void*               file;
     uint32_t            audio_start;    /* After the ID3v2 tag and the Xing frame */
     uint32_t            audio_end;      /* Before the ID3v1 tag */
@@ -547,10 +556,17 @@ dmod_dmmp3_api_declaration(1.0, dmmp3_t, _open, ( const char* path, int* status 
         *status = ret;
         return NULL;
     }
+    if ((m->state = Dmod_MallocTagged("fast", sizeof(state_t))) == NULL)
+    {
+        Dmod_FileClose(f);
+        Dmod_Free(m);
+        *status = -ENOMEM;
+        return NULL;
+    }
     m->magic = MP3_MAGIC;
     m->file = f;
-    m->d.scratch = &m->scratch;
-    mp3dec_init(&m->d.dec);
+    m->state->d.scratch = &m->state->scratch;
+    mp3dec_init(&m->state->d.dec);
     m->audio_start = s.first + (s.xing ? s.first_bytes : 0u);  /* (the Xing frame holds no audio) */
     m->audio_end = end;
     m->data_bytes = s.bytes;
@@ -568,6 +584,7 @@ dmod_dmmp3_api_declaration(1.0, void, _close, ( dmmp3_t mp3 ))
         return;
     Dmod_FileClose(mp3->file);
     mp3->magic = 0;
+    Dmod_Free(mp3->state);
     Dmod_Free(mp3);
 }
 
@@ -623,7 +640,7 @@ static int decode_next(dmmp3_t m)
             return 0;
         mp3dec_frame_info_t fi;
         memset(&fi, 0, sizeof(fi));
-        int samples = mp3dec_decode_frame(&m->d.dec, m->buffer + m->pos, (int)(m->length - m->pos), m->pcm, &fi);
+        int samples = mp3dec_decode_frame(&m->state->d.dec, m->buffer + m->pos, (int)(m->length - m->pos), m->pcm, &fi);
         if (fi.frame_bytes <= 0)
         {
             /* Not a whole frame in what is left: more of the file, or the end */
@@ -729,7 +746,7 @@ dmod_dmmp3_api_declaration(1.0, int, _seek, ( dmmp3_t mp3, uint32_t ms ))
     mp3->eof = false;
     mp3->pcm_frames = 0;
     mp3->pcm_pos = 0;
-    mp3dec_init(&mp3->d.dec);
+    mp3dec_init(&mp3->state->d.dec);
     mp3->frames_base = (uint64_t)ms * mp3->info.sample_rate_hz / 1000u;
     mp3->frames_out = 0;
     return 0;

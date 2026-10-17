@@ -23,6 +23,15 @@ Errors are negative `errno` values.
 | `offset`, `size` | Where the image (a JPEG, a PNG ... - the bytes of an image file) is in the MP3 file |
 | `type` | ID3v2's picture type: `DMMP3_PICTURE_FRONT` (3) the front cover, 0 other, ... |
 
+## The decoder's memory
+
+`dmmp3_open()` takes about 44 kB. 23 kB of it - minimp3's state and its
+scratch - are worked on for every frame: they are allocated as "fast" memory
+(`Dmod_MallocTagged("fast", ...)`) - a heap the system tags `fast`, when it has
+one with room, else the default memory. On an STM32F746 with its SDRAM behind a
+4 kB data cache, decoding a 44.1 kHz stereo file took 70 % of the CPU in SDRAM,
+15 % in the DTCM.
+
 ## Functions
 
 | Function | |
