@@ -30,6 +30,9 @@ dmmp3_close(mp3);
 - **Tags**: ID3v2.2, .3 and .4 - title, artist, album, in ISO-8859-1, UTF-16
   or UTF-8, given as UTF-8 of up to 63 bytes - and ID3v1 for what ID3v2 does
   not have. Pictures and everything else are skipped, never read.
+- **Covers**: `dmmp3_find_picture()` tells where the front cover (else the
+  first picture) of the ID3v2 tag is in the file - the bytes of a JPEG, a
+  PNG -, for an image decoder to read it from there.
 - **Length**: from the Xing / Info header's frame count (VBR files made by
   LAME, ffmpeg), else from the first frame's bit rate.
 - **Seeking**: by the Xing table of contents (as close as it tells), else by
@@ -52,11 +55,13 @@ cmake -S . -B build && cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-`tests/fixtures` holds three small files made with ffmpeg (libmp3lame): a
+`tests/fixtures` holds four small files made with ffmpeg (libmp3lame): a
 constant bit rate mono file without tags, a VBR stereo file with a Xing
-header and ID3v2.3 tags in UTF-16, a file with an ID3v1 tag only. The test
+header and ID3v2.3 tags in UTF-16, a file with an ID3v1 tag only, a file
+with a front cover (a small JPEG). The test
 reads their tags and lengths, decodes them (the tones are checked by their
-zero crossings) and seeks in them.
+zero crossings) and seeks in them. The tags with pictures are made by the
+test itself.
 
 ## License
 

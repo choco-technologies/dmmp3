@@ -16,6 +16,13 @@ Errors are negative `errno` values.
 | `duration_ms` | From the Xing frame count, else the bit rate; 0 when not known |
 | `title`, `artist`, `album` | UTF-8, cut to `DMMP3_TAG_SIZE` (64) with the zero, not in a character; `""` without a tag |
 
+## `dmmp3_picture_t`
+
+| Field | |
+|-------|-|
+| `offset`, `size` | Where the image (a JPEG, a PNG ... - the bytes of an image file) is in the MP3 file |
+| `type` | ID3v2's picture type: `DMMP3_PICTURE_FRONT` (3) the front cover, 0 other, ... |
+
 ## Functions
 
 | Function | |
@@ -27,9 +34,16 @@ Errors are negative `errno` values.
 | `int dmmp3_seek(dmmp3_t mp3, uint32_t ms)` | To `ms` from the start (clamped to the length) - see below |
 | `uint32_t dmmp3_tell(dmmp3_t mp3)` | Milliseconds of what was read, from the start or the last seek's position |
 | `void dmmp3_close(dmmp3_t mp3)` | Safe on NULL |
+| `int dmmp3_find_picture(const char* path, dmmp3_picture_t* picture)` | The cover: the front cover of the ID3v2 tag, else its first picture - see below. `-ENOENT`, `-ENODATA` (none) |
 
 A seek goes by the Xing table of contents - a byte position for every
 percent of the time, as precise as the encoder made it - or, without one,
 by the bit rate. minimp3 then leaves out the frames that need the bit
 reservoir of the frames before them (a few); their time is counted by
 `dmmp3_tell()`.
+
+`dmmp3_find_picture()` reads the headers of the tag's frames, not the
+pictures: an image decoder reads the image from the file at `offset` (e.g. a
+dmimg input that seeks to it). A picture that is not in the file as it is -
+in an unsynchronised tag or frame, compressed, encrypted - is not given, nor
+one whose description is longer than about 500 bytes.
