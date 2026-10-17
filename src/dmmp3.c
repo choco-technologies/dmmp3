@@ -18,6 +18,7 @@ static void* scratch_of(void* dec);
 
 #define BUFFER_SIZE     16384u      /* Of the file at once: minimp3 syncs on several frames */
 #define MAX_TAG_FRAME   4096u       /* A tag text longer than this is not read (pictures are skipped) */
+#define PICTURE_HEAD    512u        /* Of a picture frame read for its header: the picture's description fits in it */
 #define MP3_MAGIC       0x4D503344u /* 'MP3D' */
 
 /* minimp3's decoder with its scratch (NULL: only the frames' headers are read) */
@@ -183,56 +184,158 @@ static void trim(char* s)
         s[--n] = '\0';
 }
 
-/* ID3v2 at the start: its tags; returns the bytes it takes (0: none) */
-static uint32_t read_id3v2(void* f, dmmp3_info_t* info)
+/* An ID3v2 tag at the start of a file: its frames, one after another */
+typedef struct
+{
+    void*       f;
+    uint8_t     version;        /* 2, 3, 4 */
+    bool        unsync;         /* The whole tag unsynchronised */
+    uint32_t    size;           /* Of the frames, with the padding */
+    uint32_t    at;             /* The next frame */
+    uint32_t    end;            /* Of the tag: where the audio may start */
+} id3_t;
+
+/* A frame of it */
+typedef struct
+{
+    char        id[5];
+    uint32_t    at;             /* Of its data */
+    uint32_t    size;
+    uint8_t     flags;          /* Its format flags (2.3, 2.4) */
+} frame_t;
+
+/* The tag's header; false when the file has no ID3v2 tag */
+static bool id3_open(void* f, id3_t* t)
 {
     uint8_t h[10];
     if (!read_at(f, 0, h, sizeof(h)) || memcmp(h, "ID3", 3) != 0 || h[3] < 2 || h[3] > 4)
-        return 0;
-    uint8_t version = h[3];
-    uint32_t size = syncsafe(h + 6);
-    uint32_t end = 10u + size + (((h[5] & 0x10u) != 0) ? 10u : 0u);     /* (with a footer) */
-    uint32_t at = 10;
-    if (version >= 3 && (h[5] & 0x40u) != 0)
+        return false;
+    t->f = f;
+    t->version = h[3];
+    t->unsync = (h[5] & 0x80u) != 0;
+    t->size = syncsafe(h + 6);
+    t->end = 10u + t->size + (((h[5] & 0x10u) != 0) ? 10u : 0u);      /* (with a footer) */
+    t->at = 10;
+    if (t->version >= 3 && (h[5] & 0x40u) != 0)
     {
         /* An extended header: skipped */
         uint8_t e[4];
-        if (!read_at(f, at, e, 4))
-            return end;
-        at += (version == 4) ? syncsafe(e) : be32(e) + 4u;
-    }
-    uint8_t* text = Dmod_Malloc(MAX_TAG_FRAME);
-    uint32_t header = (version == 2) ? 6u : 10u;
-    while (text != NULL && at + header <= 10u + size)
-    {
-        uint8_t fh[10];
-        uint32_t fsize;
-        char id[5] = { 0 };
-        if (!read_at(f, at, fh, header) || fh[0] == 0)
-            break;                                      /* The padding */
-        if (version == 2)
-        {
-            memcpy(id, fh, 3);
-            fsize = ((uint32_t)fh[3] << 16) | ((uint32_t)fh[4] << 8) | fh[5];
-        }
+        if (!read_at(f, t->at, e, 4))
+            t->at = t->end;
         else
-        {
-            memcpy(id, fh, 4);
-            fsize = (version == 4) ? syncsafe(fh + 4) : be32(fh + 4);
-        }
-        at += header;
-        char* to = (strcmp(id, "TIT2") == 0 || strcmp(id, "TT2") == 0) ? info->title :
-                   (strcmp(id, "TPE1") == 0 || strcmp(id, "TP1") == 0) ? info->artist :
-                   (strcmp(id, "TALB") == 0 || strcmp(id, "TAL") == 0) ? info->album : NULL;
-        if (to != NULL && fsize > 0 && fsize <= MAX_TAG_FRAME && read_at(f, at, text, fsize))
-            tag_text(text, fsize, to);
-        if (fsize > size)
-            break;
-        at += fsize;                                    /* (a picture: skipped, never read) */
+            t->at += (t->version == 4) ? syncsafe(e) : be32(e) + 4u;
+    }
+    return true;
+}
+
+/* The next frame; false after the last one (the padding, the end of the tag) */
+static bool id3_next(id3_t* t, frame_t* fr)
+{
+    uint32_t header = (t->version == 2) ? 6u : 10u;
+    uint8_t fh[10];
+    if (t->at + header > 10u + t->size || !read_at(t->f, t->at, fh, header) || fh[0] == 0)
+        return false;                                   /* The padding */
+    memset(fr, 0, sizeof(*fr));
+    if (t->version == 2)
+    {
+        memcpy(fr->id, fh, 3);
+        fr->size = ((uint32_t)fh[3] << 16) | ((uint32_t)fh[4] << 8) | fh[5];
+    }
+    else
+    {
+        memcpy(fr->id, fh, 4);
+        fr->size = (t->version == 4) ? syncsafe(fh + 4) : be32(fh + 4);
+        fr->flags = fh[9];
+    }
+    fr->at = t->at + header;
+    if (fr->size > t->size)
+        return false;
+    t->at = fr->at + fr->size;
+    return true;
+}
+
+/* ID3v2 at the start: its tags; returns the bytes it takes (0: none) */
+static uint32_t read_id3v2(void* f, dmmp3_info_t* info)
+{
+    id3_t t;
+    frame_t fr;
+    if (!id3_open(f, &t))
+        return 0;
+    uint8_t* text = Dmod_Malloc(MAX_TAG_FRAME);
+    while (text != NULL && id3_next(&t, &fr))
+    {
+        char* to = (strcmp(fr.id, "TIT2") == 0 || strcmp(fr.id, "TT2") == 0) ? info->title :
+                   (strcmp(fr.id, "TPE1") == 0 || strcmp(fr.id, "TP1") == 0) ? info->artist :
+                   (strcmp(fr.id, "TALB") == 0 || strcmp(fr.id, "TAL") == 0) ? info->album : NULL;
+        if (to != NULL && fr.size > 0 && fr.size <= MAX_TAG_FRAME && read_at(f, fr.at, text, fr.size))
+            tag_text(text, fr.size, to);
+        /* (a picture: skipped, never read) */
     }
     if (text != NULL)
         Dmod_Free(text);
-    return end;
+    return t.end;
+}
+
+/*
+ * A picture frame (APIC, 2.2: PIC) whose image is in the file as it is: not
+ * unsynchronised, compressed or encrypted. Its image: after the header of the
+ * frame's data - the text encoding, the MIME type (2.2: a 3-letter format),
+ * the picture type and a description. False: not such a frame.
+ */
+static bool picture_of(const id3_t* t, const frame_t* fr, uint8_t* head, dmmp3_picture_t* picture)
+{
+    uint32_t skip = 0;                                  /* Before the data: a group, a length */
+    if (t->unsync)
+        return false;
+    if (t->version == 2)
+    {
+        if (strcmp(fr->id, "PIC") != 0)
+            return false;
+    }
+    else if (strcmp(fr->id, "APIC") != 0)
+        return false;
+    else if (t->version == 3)
+    {
+        if ((fr->flags & 0xC0u) != 0)                  /* Compressed, encrypted */
+            return false;
+        skip = ((fr->flags & 0x20u) != 0) ? 1u : 0u;
+    }
+    else
+    {
+        if ((fr->flags & 0x0Eu) != 0)                  /* Compressed, encrypted, unsynchronised */
+            return false;
+        skip = (((fr->flags & 0x40u) != 0) ? 1u : 0u) + (((fr->flags & 0x01u) != 0) ? 4u : 0u);
+    }
+    if (fr->size <= skip)
+        return false;
+    uint32_t n = fr->size - skip;
+    if (n > PICTURE_HEAD)
+        n = PICTURE_HEAD;
+    if (!read_at(t->f, fr->at + skip, head, n))
+        return false;
+    uint32_t i = 1;                                     /* After the encoding */
+    if (t->version == 2)
+        i += 3;
+    else
+    {
+        while (i < n && head[i] != 0)
+            i++;
+        i++;
+    }
+    if (i >= n)
+        return false;
+    uint8_t type = head[i++];
+    bool wide = head[0] == 1 || head[0] == 2;         /* UTF-16: ended by two zeros, at an even place */
+    uint32_t start = i;
+    while (i < n && !(wide ? (i + 1U < n && head[i] == 0 && head[i + 1U] == 0 && ((i - start) & 1u) == 0) : head[i] == 0))
+        i++;
+    i += wide ? 2u : 1u;
+    if (i >= n)
+        return false;                                   /* (a description longer than PICTURE_HEAD: not read) */
+    picture->offset = fr->at + skip + i;
+    picture->size = fr->size - skip - i;
+    picture->type = type;
+    return true;
 }
 
 /* ID3v1 at the end: what ID3v2 did not give; returns the bytes it takes (0 or 128) */
@@ -367,6 +470,38 @@ dmod_dmmp3_api_declaration(1.0, int, _read_info, ( const char* path, dmmp3_info_
     stream_t s;
     uint32_t end;
     int ret = read_file_info(f, info, &s, &end);
+    Dmod_FileClose(f);
+    return ret;
+}
+
+dmod_dmmp3_api_declaration(1.0, int, _find_picture, ( const char* path, dmmp3_picture_t* picture ))
+{
+    if (path == NULL || picture == NULL)
+        return -EINVAL;
+    void* f = Dmod_FileOpen(path, "rb");
+    if (f == NULL)
+        return -ENOENT;
+    id3_t t;
+    frame_t fr;
+    dmmp3_picture_t p;
+    bool found = false;
+    uint8_t* head = Dmod_Malloc(PICTURE_HEAD);
+    int ret = (head == NULL) ? -ENOMEM : -ENODATA;
+    if (head != NULL && id3_open(f, &t))
+    {
+        while (id3_next(&t, &fr))
+        {
+            if (!picture_of(&t, &fr, head, &p) || p.size == 0 || (found && p.type != DMMP3_PICTURE_FRONT))
+                continue;
+            *picture = p;                               /* The first one, or the front cover */
+            found = true;
+            ret = 0;
+            if (p.type == DMMP3_PICTURE_FRONT)
+                break;
+        }
+    }
+    if (head != NULL)
+        Dmod_Free(head);
     Dmod_FileClose(f);
     return ret;
 }
