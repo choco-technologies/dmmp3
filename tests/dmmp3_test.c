@@ -9,6 +9,8 @@
  *   cbr_mono.mp3   1 s of 440 Hz, 22050 Hz mono, 32 kbit/s, no tags, no Xing header
  *   vbr_tags.mp3   2 s of 1000 Hz, 44100 Hz stereo, VBR with a Xing header, ID3v2.3 (UTF-16 texts)
  *   id3v1.mp3      1 s of 440 Hz, 48000 Hz stereo, 64 kbit/s, an ID3v1 tag only
+ *   cover.mp3      0.5 s of 440 Hz, 22050 Hz mono, ID3v2.3 with the front cover: a 16x16 JPEG
+ *                  of 765 bytes at 92 (ffmpeg -i ... -i cover.jpg -map 0:a -map 1:v -c:v copy)
  */
 
 #define FIXTURE(name)   DMMP3_FIXTURES "/" name
@@ -153,4 +155,166 @@ DMOD_TEST_STEP(dmmp3_refuses_what_is_not_mp3)
     DMOD_TEST_EXPECT_EQ(dmmp3_read(NULL, g_pcm, 1), -EINVAL);
     DMOD_TEST_EXPECT_EQ(dmmp3_get_info(NULL, &info), -EINVAL);
     dmmp3_close(NULL);
+}
+
+/* ---- Pictures: tags made here, the "images" in them only some bytes ---- */
+
+static uint8_t g_tag[1024];
+static uint32_t g_tag_length;
+
+static void put(const void* data, uint32_t size)
+{
+    memcpy(g_tag + g_tag_length, data, size);
+    g_tag_length += size;
+}
+
+static void put_size(uint32_t size, bool syncsafe)
+{
+    uint8_t b[4];
+    for (int i = 0; i < 4; i++)
+        b[i] = syncsafe ? (uint8_t)((size >> (7 * (3 - i))) & 0x7Fu) : (uint8_t)(size >> (8 * (3 - i)));
+    put(b, 4);
+}
+
+/* A tag of that version (2, 3, 4) and flags begins */
+static void tag_begin(uint8_t version, uint8_t flags)
+{
+    const uint8_t h[6] = { 'I', 'D', '3', version, 0, flags };
+    g_tag_length = 0;
+    put(h, sizeof(h));
+    put_size(0, true);                                  /* (written by tag_write()) */
+}
+
+/* A frame of the tag; its data a string literal */
+#define FRAME(id, flags, data)  put_frame(id, flags, data, sizeof(data) - 1U)
+
+static void put_frame(const char* id, uint8_t flags, const void* data, uint32_t size)
+{
+    if (g_tag[3] == 2)
+    {
+        const uint8_t s[3] = { (uint8_t)(size >> 16), (uint8_t)(size >> 8), (uint8_t)size };
+        put(id, 3);
+        put(s, 3);
+    }
+    else
+    {
+        const uint8_t f[2] = { 0, flags };
+        put(id, 4);
+        put_size(size, g_tag[3] == 4);
+        put(f, 2);
+    }
+    put(data, size);
+}
+
+/* The tag, its padding and some bytes after it, into the file `name` */
+static const char* tag_write(const char* name)
+{
+    static char path[128];
+    static const uint8_t after[32] = { 0 };
+    uint32_t length = g_tag_length;
+    g_tag_length = 6;
+    put_size(length - 10U + 16U, true);                 /* With 16 bytes of padding */
+    g_tag_length = length;
+    Dmod_SnPrintf(path, sizeof(path), "%s/%s", DMMP3_TEMP, name);
+    void* f = Dmod_FileOpen(path, "wb");
+    if (f != NULL)
+    {
+        Dmod_FileWrite(g_tag, 1, g_tag_length, f);
+        Dmod_FileWrite(after, 1, sizeof(after), f);
+        Dmod_FileClose(f);
+    }
+    return path;
+}
+
+/* Whether the picture found is the image `image` (a string literal) */
+static bool is_image(const char* path, const dmmp3_picture_t* p, const char* image)
+{
+    char got[32] = { 0 };
+    void* f = Dmod_FileOpen(path, "rb");
+    bool ok = f != NULL && p->size == strlen(image) && p->size < sizeof(got) &&
+              Dmod_FileSeek(f, (Dmod_FileOffset_t)p->offset, DMOD_SEEK_SET) == 0 &&
+              Dmod_FileRead(got, 1, p->size, f) == p->size && memcmp(got, image, p->size) == 0;
+    if (f != NULL)
+        Dmod_FileClose(f);
+    if (!ok)
+        Dmod_Printf("    the picture at %u (%u bytes) is \"%s\", not \"%s\"\n", (unsigned)p->offset, (unsigned)p->size, got, image);
+    return ok;
+}
+
+DMOD_TEST_STEP(dmmp3_finds_the_front_cover)
+{
+    /* As ffmpeg writes it */
+    dmmp3_picture_t p;
+    dmmp3_info_t info;
+    uint8_t ends[4];
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(FIXTURE("cover.mp3"), &p), 0);
+    DMOD_TEST_EXPECT_EQ(p.type, DMMP3_PICTURE_FRONT);
+    DMOD_TEST_EXPECT_EQ(p.offset, 92u);
+    DMOD_TEST_EXPECT_EQ(p.size, 765u);
+    void* f = Dmod_FileOpen(FIXTURE("cover.mp3"), "rb");
+    DMOD_TEST_EXPECT_NOT_NULL(f);
+    if (f != NULL)
+    {
+        (void)Dmod_FileSeek(f, (Dmod_FileOffset_t)p.offset, DMOD_SEEK_SET);
+        (void)Dmod_FileRead(ends, 1, 2, f);
+        (void)Dmod_FileSeek(f, (Dmod_FileOffset_t)(p.offset + p.size - 2U), DMOD_SEEK_SET);
+        (void)Dmod_FileRead(ends + 2, 1, 2, f);
+        Dmod_FileClose(f);
+        DMOD_TEST_EXPECT_TRUE(ends[0] == 0xFF && ends[1] == 0xD8 && ends[2] == 0xFF && ends[3] == 0xD9);     /* SOI ... EOI */
+    }
+    DMOD_TEST_EXPECT_EQ(dmmp3_read_info(FIXTURE("cover.mp3"), &info), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(info.title, "With Cover"), 0);
+    DMOD_TEST_EXPECT_TRUE(near(info.duration_ms, 500, 120));
+
+    /* 2.3: another picture first, the front cover with a UTF-16 description ("Co") */
+    tag_begin(3, 0);
+    FRAME("TIT2", 0, "\x00" "Covers");
+    FRAME("APIC", 0, "\x00" "image/png\x00" "\x00" "\x00" "PNG-OTHER");
+    FRAME("APIC", 0, "\x01" "image/jpeg\x00" "\x03" "\xFF\xFE" "C\x00o\x00" "\x00\x00" "JPEG-FRONT");
+    FRAME("TPE1", 0, "\x00" "After");
+    const char* path = tag_write("covers23.mp3");
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(path, &p), 0);
+    DMOD_TEST_EXPECT_EQ(p.type, DMMP3_PICTURE_FRONT);
+    DMOD_TEST_EXPECT_TRUE(is_image(path, &p, "JPEG-FRONT"));
+    memset(&info, 0, sizeof(info));
+    (void)dmmp3_read_info(path, &info);                 /* (no audio: only its tags) */
+    DMOD_TEST_EXPECT_EQ(strcmp(info.title, "Covers"), 0);
+    DMOD_TEST_EXPECT_EQ(strcmp(info.artist, "After"), 0);
+
+    /* 2.2: PIC, a format in place of the MIME type */
+    tag_begin(2, 0);
+    FRAME("TT2", 0, "\x00" "Old");
+    FRAME("PIC", 0, "\x00" "JPG" "\x03" "front\x00" "JPEG-22");
+    path = tag_write("covers22.mp3");
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(path, &p), 0);
+    DMOD_TEST_EXPECT_EQ(p.type, DMMP3_PICTURE_FRONT);
+    DMOD_TEST_EXPECT_TRUE(is_image(path, &p, "JPEG-22"));
+}
+
+DMOD_TEST_STEP(dmmp3_finds_a_picture_stored_as_it_is)
+{
+    /* 2.4: the front cover unsynchronised (not given), then the band's with a group and a length before it */
+    dmmp3_picture_t p;
+    tag_begin(4, 0);
+    FRAME("APIC", 0x02, "\x00" "image/jpeg\x00" "\x03" "\x00" "JPEG\xFF\x00" "SYNC");
+    FRAME("APIC", 0x41, "\x07" "\x00\x00\x00\x14" "\x03" "image/png\x00" "\x08" "band\x00" "PNG-BAND");
+    const char* path = tag_write("covers24.mp3");
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(path, &p), 0);
+    DMOD_TEST_EXPECT_EQ(p.type, 8);
+    DMOD_TEST_EXPECT_TRUE(is_image(path, &p, "PNG-BAND"));
+
+    /* 2.3 unsynchronised as a whole, compressed: none */
+    tag_begin(3, 0x80);
+    FRAME("APIC", 0, "\x00" "image/png\x00" "\x03" "\x00" "PNG-UNSYNC");
+    path = tag_write("unsync23.mp3");
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(path, &p), -ENODATA);
+    tag_begin(3, 0);
+    FRAME("APIC", 0x80, "\x00\x00\x00\x20" "x\x9C" "zlib");
+    path = tag_write("zlib23.mp3");
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(path, &p), -ENODATA);
+
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(FIXTURE("vbr_tags.mp3"), &p), -ENODATA);    /* Tags, no picture */
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(FIXTURE("cbr_mono.mp3"), &p), -ENODATA);    /* No tag */
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(FIXTURE("none.mp3"), &p), -ENOENT);
+    DMOD_TEST_EXPECT_EQ(dmmp3_find_picture(NULL, &p), -EINVAL);
 }

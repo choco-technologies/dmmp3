@@ -20,6 +20,10 @@
  * ID3v2.2, .3, .4 (title, artist, album; ISO-8859-1, UTF-16, UTF-8 texts,
  * given as UTF-8) and ID3v1. The length is the Xing / Info header's frame
  * count, else estimated from the bit rate of the first frame.
+ *
+ * A file's cover (dmmp3_find_picture()) is not read: what is given is where
+ * the image file (a JPEG, a PNG ...) is in the MP3 file, for an image decoder
+ * to read it from there.
  */
 
 /** Bytes of a tag text with its terminating zero (longer ones are cut, not in a character). */
@@ -39,6 +43,17 @@ typedef struct
     char        artist[DMMP3_TAG_SIZE];
     char        album[DMMP3_TAG_SIZE];
 } dmmp3_info_t;
+
+/** ID3v2's picture type of the front cover */
+#define DMMP3_PICTURE_FRONT 3u
+
+/** A picture of a file's ID3v2 tag (an APIC frame, 2.2: PIC): where its image is. */
+typedef struct
+{
+    uint32_t    offset;                     /**< Of the image's first byte in the MP3 file */
+    uint32_t    size;                       /**< Of the image, bytes */
+    uint8_t     type;                       /**< ID3v2's picture type: DMMP3_PICTURE_FRONT, 0 other, ... */
+} dmmp3_picture_t;
 
 /**
  * @brief Open an MP3 file for decoding.
@@ -79,5 +94,14 @@ dmod_dmmp3_api(1.0, uint32_t, _tell, ( dmmp3_t mp3 ));
  * @return 0, -ENOENT, -EBADMSG (no MP3 frame), -EINVAL
  */
 dmod_dmmp3_api(1.0, int, _read_info, ( const char* path, dmmp3_info_t* info ));
+
+/**
+ * @brief Where the cover of a file is: the front cover of its ID3v2 tag, else
+ *        its first picture. Only a picture stored as it is - not
+ *        unsynchronised, compressed or encrypted - is given: the image is
+ *        read from the file at `offset`.
+ * @return 0, -ENOENT (no file), -ENODATA (no such picture), -ENOMEM, -EINVAL
+ */
+dmod_dmmp3_api(1.0, int, _find_picture, ( const char* path, dmmp3_picture_t* picture ));
 
 #endif /* DMMP3_H */
