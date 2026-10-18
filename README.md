@@ -26,7 +26,10 @@ dmmp3_close(mp3);
   samples. Its 16 kB scratch is the decoder's, not the stack's (one change of
   `src/minimp3/minimp3.h`, marked at its top), so a thread with a small stack
   decodes. A decoder takes about 44 kB of the heap: minimp3's state and
-  scratch, 16 kB of the file, a frame of samples.
+  scratch, 16 kB of the file, a frame of samples. The state and the scratch
+  (23 kB, worked on all the time) are "fast" memory when the system has it
+  (`Dmod_MallocTagged`): internal RAM where the default memory is external -
+  on an STM32F746 with SDRAM, decoding takes a quarter of the time.
 - **Tags**: ID3v2.2, .3 and .4 - title, artist, album, in ISO-8859-1, UTF-16
   or UTF-8, given as UTF-8 of up to 63 bytes - and ID3v1 for what ID3v2 does
   not have. Pictures and everything else are skipped, never read.
